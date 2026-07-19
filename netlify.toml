@@ -1,10 +1,10 @@
 [build]
-  command = \"pip install -r requirements.txt\"
+  command = "pip install -r requirements.txt"
 
 [functions]
-  directory = \"netlify/functions\"
+  directory = "netlify/functions"
 
 [[redirects]]
-  from = \"/*\"
-  to = \"/.netlify/functions/web\"
+  from = "/*"
+  to = "/.netlify/functions/web"
   status = 200
