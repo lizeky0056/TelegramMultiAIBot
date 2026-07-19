@@ -1,5 +1,5 @@
 [build]
-  command = "pip install -r requirements.txt"
+  command = "echo 'No build command needed'"
   functions = "netlify/functions"
 
 [build.environment]
@@ -10,6 +10,6 @@
 
 [[redirects]]
   from = "/*"
-  to = "/.netlify/functions/web/:splat"
+  to = "/.netlify/functions/web"
   status = 200
   force = true
