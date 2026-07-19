@@ -3,8 +3,10 @@
 
 [functions]
   directory = "netlify/functions"
+  included_files = ["*.py", "*.json"]
 
 [[redirects]]
   from = "/*"
   to = "/.netlify/functions/web"
   status = 200
+
