@@ -2,134 +2,167 @@ import os
 import google.generativeai as genai
 from openai import OpenAI
 from anthropic import Anthropic
+from typing import Optional
+import logging
 
-# Model lists
+logger = logging.getLogger(__name__)
+
+# Modelos actualizados con las versiones más recientes de 2025
 MODELS = {
     "gemini": [
-        "gemini-1.5-flash",
-        "gemini-1.5-pro",
-        "gemini-2.0-flash-exp",
         "gemini-2.5-flash",
-        "gemini-2.5-pro"
+        "gemini-2.5-pro",
+        "gemini-2.0-flash-exp",
+        "gemini-1.5-pro",
+        "gemini-1.5-flash",
     ],
     "openai": [
         "gpt-4o-mini",
         "gpt-4o",
+        "gpt-4-turbo",
+        "o3-mini",
         "o1-mini",
-        "o3-mini"
     ],
     "anthropic": [
-        "claude-3-5-haiku-latest",
+        "claude-sonnet-4-5",
         "claude-3-5-sonnet-latest",
-        "claude-3-opus-20240229"
+        "claude-3-5-haiku-latest",
+        "claude-3-opus-20240229",
     ],
     "grok": [
+        "grok-3",
+        "grok-3-mini",
         "grok-2-1212",
-        "grok-beta",
-        "grok-2-vision-1212"
+        "grok-2-vision-1212",
     ]
 }
 
-# In-memory history cache: {user_id: [{"role": "user"/"assistant", "content": "..."}]}
-_history = {}
+# Límite de historial configurable (20 mensajes = 10 turnos)
+HISTORY_LIMIT = 20
 
-def get_history(user_id):
+# Cache en memoria: {uid: [{"role": "user"/"assistant", "content": "..."}]}
+_history: dict[str, list[dict]] = {}
+
+def get_history(user_id) -> list:
     uid = str(user_id)
     if uid not in _history:
         _history[uid] = []
     return _history[uid]
 
-def clear_history(user_id):
+def clear_history(user_id) -> None:
     uid = str(user_id)
-    if uid in _history:
-        _history[uid] = []
+    _history[uid] = []
 
-def add_message(user_id, role, content):
+def add_message(user_id, role: str, content: str) -> None:
     uid = str(user_id)
     hist = get_history(uid)
     hist.append({"role": role, "content": content})
-    # Keep last 10 turns (20 messages) to avoid token issues in short bots
-    if len(hist) > 20:
-        _history[uid] = hist[-20:]
+    # Mantener solo los últimos N mensajes
+    if len(hist) > HISTORY_LIMIT:
+        _history[uid] = hist[-HISTORY_LIMIT:]
 
-def generate_response(user_id, prompt, config):
+def _build_error(provider: str, model: str, err: Exception) -> str:
+    """Formatea el error de la IA de forma uniforme y útil."""
+    err_str = str(err)
+    # Detectar errores comunes y dar sugerencias útiles
+    if "API_KEY_INVALID" in err_str or "Incorrect API key" in err_str or "authentication" in err_str.lower():
+        return (
+            f"🔑 *Error de API Key en {provider.upper()}*\n\n"
+            f"La key configurada para `{provider}` no es válida o ha expirado.\n"
+            f"Usa el botón *Ver Estado / Keys* del menú o el *Panel Web* para actualizarla."
+        )
+    if "quota" in err_str.lower() or "rate" in err_str.lower() or "429" in err_str:
+        return (
+            f"⏳ *Límite de peticiones alcanzado en {provider.upper()}*\n\n"
+            f"Tu plan de `{model}` ha alcanzado el límite de solicitudes por minuto.\n"
+            f"Espera unos segundos y vuelve a intentarlo, o cambia de modelo/proveedor."
+        )
+    if "model" in err_str.lower() and ("not found" in err_str.lower() or "does not exist" in err_str.lower()):
+        return (
+            f"🤖 *Modelo no disponible: `{model}`*\n\n"
+            f"Este modelo ya no está disponible en {provider.upper()}.\n"
+            f"Usa el botón *Cambiar Modelo* del menú para seleccionar uno disponible."
+        )
+    return f"❌ *Error en {provider.upper()} (`{model}`)*:\n`{err_str[:300]}`"
+
+def generate_response(user_id, prompt: str, cfg: dict) -> str:
     uid = str(user_id)
-    provider = config.get("current_provider", "gemini")
-    api_keys = config.get("api_keys", {})
-    key = api_keys.get(provider, "")
-    selected_models = config.get("selected_models", {})
-    model_name = selected_models.get(provider, "")
-    
-    if not key:
-        return f"⚠️ No has configurado la API Key para *{provider.upper()}*.\n\nPor favor usa el comando `/key` para guardarla, o pulsa en el botón de configuración web para iniciar sesión de manera segura."
+    provider = cfg.get("current_provider", "gemini")
+    api_keys = cfg.get("api_keys", {})
+    key = api_keys.get(provider, "").strip()
+    selected_models = cfg.get("selected_models", {})
+    model_name = selected_models.get(provider, "") or (MODELS[provider][0] if provider in MODELS else "default")
 
-    if not model_name:
-        if provider in MODELS and len(MODELS[provider]) > 0:
-            model_name = MODELS[provider][0]
-        else:
-            model_name = "default"
+    if not key:
+        return (
+            f"⚠️ *Sin API Key para {provider.upper()}*\n\n"
+            f"No has configurado tu key para `{provider}`.\n"
+            f"Usa el menú → *Ver Estado / Keys* → *Configurar por Chat* o abre el *Panel Web* con `/login`."
+        )
 
     try:
-        # Add user prompt to history
         add_message(uid, "user", prompt)
         hist = get_history(uid)
 
+        result: Optional[str] = None
+
         if provider == "gemini":
             genai.configure(api_key=key)
-            gemini_history = []
-            # We must map roles to 'user' or 'model'
-            for msg in hist[:-1]:
-                g_role = "user" if msg["role"] == "user" else "model"
-                gemini_history.append({"role": g_role, "parts": [msg["content"]]})
-            
-            model = genai.GenerativeModel(model_name)
+            gemini_history = [
+                {"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]}
+                for m in hist[:-1]
+            ]
+            model = genai.GenerativeModel(
+                model_name,
+                system_instruction="Eres un asistente de IA útil, amable y preciso. Responde siempre en el idioma del usuario."
+            )
             chat = model.start_chat(history=gemini_history)
             response = chat.send_message(prompt)
             result = response.text
-            
+
         elif provider == "openai":
             client = OpenAI(api_key=key)
-            messages = [{"role": msg["role"], "content": msg["content"]} for msg in hist]
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=messages
-            )
+            messages = [
+                {"role": "system", "content": "Eres un asistente de IA útil, amable y preciso. Responde siempre en el idioma del usuario."}
+            ] + [{"role": m["role"], "content": m["content"]} for m in hist]
+            response = client.chat.completions.create(model=model_name, messages=messages)
             result = response.choices[0].message.content
-            
+
         elif provider == "grok":
-            # Grok uses the OpenAI-compatible endpoint
             client = OpenAI(api_key=key, base_url="https://api.x.ai/v1")
-            messages = [{"role": msg["role"], "content": msg["content"]} for msg in hist]
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=messages
-            )
+            messages = [
+                {"role": "system", "content": "Eres un asistente de IA útil, amable y preciso. Responde siempre en el idioma del usuario."}
+            ] + [{"role": m["role"], "content": m["content"]} for m in hist]
+            response = client.chat.completions.create(model=model_name, messages=messages)
             result = response.choices[0].message.content
-            
+
         elif provider == "anthropic":
             client = Anthropic(api_key=key)
-            # Ensure history starts with user and alternates
-            anthropic_messages = []
-            for msg in hist:
-                role = "user" if msg["role"] == "user" else "assistant"
-                anthropic_messages.append({"role": role, "content": msg["content"]})
+            anthropic_msgs = [
+                {"role": "user" if m["role"] == "user" else "assistant", "content": m["content"]}
+                for m in hist
+            ]
+            # Anthropic requiere que el primer mensaje sea del usuario
+            if anthropic_msgs and anthropic_msgs[0]["role"] != "user":
+                anthropic_msgs = anthropic_msgs[1:]
             
             message = client.messages.create(
                 model=model_name,
-                max_tokens=2048,
-                messages=anthropic_messages
+                max_tokens=4096,
+                system="Eres un asistente de IA útil, amable y preciso. Responde siempre en el idioma del usuario.",
+                messages=anthropic_msgs
             )
             result = message.content[0].text
         else:
-            result = f"Error: Proveedor '{provider}' no soportado."
-            
-        # Add assistant response
+            result = f"❌ Proveedor `{provider}` no soportado."
+
         add_message(uid, "assistant", result)
         return result
 
     except Exception as e:
-        # Fallback: remove last prompt on failure
+        # Revertir el último mensaje del usuario en caso de fallo
         hist = get_history(uid)
-        if hist and hist[-1]["content"] == prompt:
+        if hist and hist[-1]["role"] == "user" and hist[-1]["content"] == prompt:
             hist.pop()
-        return f"❌ *Error en {provider.upper()} ({model_name})*:\n`{str(e)}`"
+        logger.error(f"[AI] Error generando respuesta ({provider}/{model_name}): {e}")
+        return _build_error(provider, model_name, e)
