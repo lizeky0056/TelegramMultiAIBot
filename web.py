@@ -1,22 +1,46 @@
-from fastapi import FastAPI, Form, Query, HTTPException
-
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Form, Query, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 import os
+import json
 import config
 from ai import MODELS
 from dotenv import load_dotenv
 import urllib.request
 import urllib.parse
+import logging
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8886104559:AAHclO0tYWadm4eMMrPB1C3PjQI6uqOps4U")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
 app = FastAPI(title="Boty Generator Telegram Config Panel")
 
 @app.get("/health")
 def health_check():
     return {"status": "ok", "message": "Boty Generator backend is running smoothly"}
+
+@app.post("/webhook")
+async def telegram_webhook(request: Request):
+    """
+    Endpoint que recibe los updates de Telegram vía Webhook.
+    Telegram llama aquí cada vez que hay un nuevo mensaje.
+    """
+    try:
+        import telebot
+        from bot import bot as telegram_bot
+
+        body = await request.body()
+        update_data = json.loads(body)
+        logger.info(f"[Webhook] Update recibido: {update_data.get('update_id', 'N/A')}")
+        update = telebot.types.Update.de_json(update_data)
+        telegram_bot.process_new_updates([update])
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        logger.error(f"[Webhook] Error: {e}", exc_info=True)
+        # Siempre responder 200 a Telegram aunque haya error (para que no reintente)
+        return JSONResponse({"ok": False, "error": str(e)})
 
 LOGIN_HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="es">
