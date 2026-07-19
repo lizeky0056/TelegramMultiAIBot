@@ -32,7 +32,7 @@ def handler(event, context):
     logger.info(f"[Function] {http_method} {path}")
 
     # ── Webhook de Telegram ──────────────────────────────────────────────────
-    if http_method == "POST" and path.rstrip("/") in ("/webhook", "/.netlify/functions/web/webhook"):
+    if http_method == "POST" and path.rstrip("/").endswith("/webhook"):
         try:
             import telebot
             from bot import get_bot

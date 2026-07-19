@@ -10,6 +10,6 @@
 
 [[redirects]]
   from = "/*"
-  to = "/.netlify/functions/web"
+  to = "/.netlify/functions/web/:splat"
   status = 200
   force = true
