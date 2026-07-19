@@ -1,6 +1,8 @@
+from __future__ import annotations
 import os
 import re
 import uuid
+
 import logging
 import threading
 import telebot
