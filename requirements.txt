@@ -1,0 +1,9 @@
+pyTelegramBotAPI
+fastapi
+uvicorn
+python-dotenv
+google-generativeai
+openai
+anthropic
+yt-dlp
+mangum
