@@ -26,3 +26,6 @@ downloads/
 firebase-debug.log
 firestore-debug.log
 .runtime/
+
+# Local Netlify folder
+.netlify
