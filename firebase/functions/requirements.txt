@@ -1,0 +1,9 @@
+firebase-functions~=2.0.0
+firebase-admin~=6.0.0
+pyTelegramBotAPI
+google-generativeai
+openai
+anthropic
+fastapi
+python-dotenv
+yt-dlp

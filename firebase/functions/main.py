@@ -1,0 +1,1107 @@
+from firebase_admin import initialize_app
+# Initialize Firebase Admin SDK first
+initialize_app()
+
+from firebase_functions import https_fn
+from fastapi import FastAPI, Form, Query, HTTPException, Request
+from fastapi.responses import HTMLResponse
+import os
+import re
+import uuid
+import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+import urllib.request
+import urllib.parse
+
+# Local imports
+import config_db as config
+import ai
+import downloader
+
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8886104559:AAHclO0tYWadm4eMMrPB1C3PjQI6uqOps4U")
+# Note: WEB_URL will be the public URL of this Cloud Function. 
+# Firebase Cloud Functions G2 format: https://<function_name>-<hash>-<region>.a.run.app or the standard URL:
+# https://<region>-<project_id>.cloudfunctions.net/<function_name>
+# Let's dynamically construct it or read from environment, default to the tikreader-e4c39 URL.
+WEB_URL = os.getenv("WEB_URL", "https://boty-generator-e4c39.cloudfunctions.net/boty_generator")
+
+app = FastAPI(title="Boty Generator Cloud Service")
+
+# Disable threading for serverless environment to prevent freezing
+bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
+
+# Memory cache for pending downloads inside execution container
+pending_downloads = {}
+waiting_for_key = {}
+
+LOGIN_HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Configuración de Boty Generator</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <style>
+        :root {{
+            --bg-color: #0b0f19;
+            --card-bg: rgba(17, 24, 39, 0.75);
+            --primary: #8b5cf6;
+            --primary-glow: rgba(139, 92, 246, 0.4);
+            --secondary: #ec4899;
+            --text-color: #f3f4f6;
+            --input-bg: rgba(31, 41, 55, 0.6);
+            --border-color: rgba(255, 255, 255, 0.08);
+        }}
+        
+        * {{
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Outfit', sans-serif;
+        }}
+        
+        body {{
+            background: radial-gradient(circle at top right, #1e1b4b, var(--bg-color));
+            color: var(--text-color);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+            overflow-x: hidden;
+            position: relative;
+        }}
+
+        .g-sphere {{
+            position: absolute;
+            width: 400px;
+            height: 400px;
+            border-radius: 50%;
+            background: var(--primary);
+            filter: blur(150px);
+            opacity: 0.12;
+            z-index: 0;
+            pointer-events: none;
+        }}
+        .g-sphere-1 {{ top: -5%; left: -5%; background: var(--secondary); }}
+        .g-sphere-2 {{ bottom: -5%; right: -5%; }}
+
+        .container {{
+            position: relative;
+            background: var(--card-bg);
+            backdrop-filter: blur(20px);
+            border: 1px solid var(--border-color);
+            border-radius: 28px;
+            padding: 35px;
+            width: 100%;
+            max-width: 600px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            z-index: 10;
+            animation: fadeIn 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+        }}
+
+        @keyframes fadeIn {{
+            from {{ opacity: 0; transform: translateY(20px); }}
+            to {{ opacity: 1; transform: translateY(0); }}
+        }}
+
+        .header {{
+            text-align: center;
+            margin-bottom: 25px;
+        }}
+
+        .logo {{
+            font-size: 2.2rem;
+            font-weight: 800;
+            background: linear-gradient(135deg, #a78bfa, var(--secondary));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 5px;
+        }}
+
+        .subtitle {{
+            color: #9ca3af;
+            font-size: 0.95rem;
+        }}
+
+        .form-group {{
+            margin-bottom: 18px;
+        }}
+
+        label {{
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            font-size: 0.9rem;
+            color: #d1d5db;
+        }}
+
+        .input-wrapper {{
+            position: relative;
+        }}
+
+        input[type="password"], input[type="text"], select {{
+            width: 100%;
+            padding: 14px 16px;
+            background: var(--input-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            color: #fff;
+            font-size: 0.95rem;
+            transition: all 0.3s;
+            outline: none;
+        }}
+
+        input:focus, select:focus {{
+            border-color: var(--primary);
+            box-shadow: 0 0 12px var(--primary-glow);
+        }}
+
+        .provider-cards {{
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+            margin-bottom: 25px;
+        }}
+
+        .provider-card {{
+            background: rgba(31, 41, 55, 0.3);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 16px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            user-select: none;
+            position: relative;
+            overflow: hidden;
+        }}
+
+        .provider-card:hover {{
+            border-color: rgba(139, 92, 246, 0.4);
+            background: rgba(31, 41, 55, 0.5);
+            transform: translateY(-2px);
+        }}
+
+        .provider-card.active {{
+            border-color: var(--primary);
+            background: rgba(139, 92, 246, 0.15);
+            box-shadow: 0 0 15px rgba(139, 92, 246, 0.25);
+        }}
+
+        .provider-card.active::after {{
+            content: '✓';
+            position: absolute;
+            top: 5px;
+            right: 12px;
+            color: var(--primary);
+            font-weight: bold;
+            font-size: 1.2rem;
+        }}
+
+        .provider-name {{
+            font-weight: 600;
+            font-size: 1rem;
+            margin-top: 4px;
+        }}
+
+        .section-title {{
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin: 25px 0 15px 0;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 8px;
+            color: #a78bfa;
+        }}
+
+        .btn-submit {{
+            display: block;
+            width: 100%;
+            padding: 16px;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            border: none;
+            border-radius: 12px;
+            color: white;
+            font-size: 1rem;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.3s;
+            box-shadow: 0 4px 15px rgba(236, 72, 153, 0.3);
+            margin-top: 30px;
+        }}
+
+        .btn-submit:hover {{
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(236, 72, 153, 0.5);
+        }}
+
+        .btn-submit:active {{
+            transform: translateY(1px);
+        }}
+
+        .model-select-group {{
+            display: none;
+        }}
+
+        .model-select-group.active {{
+            display: block;
+        }}
+
+        .toggle-password {{
+            position: absolute;
+            right: 15px;
+            top: 50%;
+            transform: translateY(-50%);
+            cursor: pointer;
+            color: #9ca3af;
+            font-size: 0.75rem;
+            user-select: none;
+            font-weight: bold;
+            letter-spacing: 0.5px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="g-sphere g-sphere-1"></div>
+    <div class="g-sphere g-sphere-2"></div>
+
+    <div class="container">
+        <div class="header">
+            <div class="logo">😈 Boty Generator 🤖</div>
+            <div class="subtitle">Panel de Configuración de API Keys para tu Bot</div>
+        </div>
+
+        <form action="./save" method="POST">
+            <input type="hidden" name="token" value="{token}">
+
+            <div class="section-title">1. Selecciona tu Proveedor Activo</div>
+            <input type="hidden" name="current_provider" id="current_provider" value="{current_provider}">
+            <div class="provider-cards">
+                <div class="provider-card {gemini_card_active}" onclick="selectProvider('gemini')">
+                    <div class="provider-name">Google Gemini</div>
+                </div>
+                <div class="provider-card {openai_card_active}" onclick="selectProvider('openai')">
+                    <div class="provider-name">ChatGPT (OpenAI)</div>
+                </div>
+                <div class="provider-card {anthropic_card_active}" onclick="selectProvider('anthropic')">
+                    <div class="provider-name">Claude (Anthropic)</div>
+                </div>
+                <div class="provider-card {grok_card_active}" onclick="selectProvider('grok')">
+                    <div class="provider-name">Grok (xAI)</div>
+                </div>
+            </div>
+
+            <div class="section-title">2. API Keys de Acceso</div>
+            
+            <div class="form-group">
+                <label>Gemini API Key</label>
+                <div class="input-wrapper">
+                    <input type="password" name="key_gemini" value="{key_gemini}" placeholder="AIzaSy...">
+                    <span class="toggle-password" onclick="toggleVisibility(this)">VER</span>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label>OpenAI API Key</label>
+                <div class="input-wrapper">
+                    <input type="password" name="key_openai" value="{key_openai}" placeholder="sk-proj-...">
+                    <span class="toggle-password" onclick="toggleVisibility(this)">VER</span>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label>Claude API Key</label>
+                <div class="input-wrapper">
+                    <input type="password" name="key_anthropic" value="{key_anthropic}" placeholder="sk-ant-...">
+                    <span class="toggle-password" onclick="toggleVisibility(this)">VER</span>
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label>Grok API Key</label>
+                <div class="input-wrapper">
+                    <input type="password" name="key_grok" value="{key_grok}" placeholder="xai-...">
+                    <span class="toggle-password" onclick="toggleVisibility(this)">VER</span>
+                </div>
+            </div>
+
+            <div class="section-title">3. Selecciona el Modelo Activo</div>
+
+            <div id="models-gemini" class="form-group model-select-group {gemini_models_active}">
+                <label>Modelo Gemini</label>
+                <select name="model_gemini">
+                    {gemini_model_options}
+                </select>
+            </div>
+
+            <div id="models-openai" class="form-group model-select-group {openai_models_active}">
+                <label>Modelo ChatGPT</label>
+                <select name="model_openai">
+                    {openai_model_options}
+                </select>
+            </div>
+
+            <div id="models-anthropic" class="form-group model-select-group {anthropic_models_active}">
+                <label>Modelo Claude</label>
+                <select name="model_anthropic">
+                    {anthropic_model_options}
+                </select>
+            </div>
+
+            <div id="models-grok" class="form-group model-select-group {grok_models_active}">
+                <label>Modelo Grok</label>
+                <select name="model_grok">
+                    {grok_model_options}
+                </select>
+            </div>
+
+            <button type="submit" class="btn-submit">Guardar Configuración ✨</button>
+        </form>
+    </div>
+
+    <script>
+        function selectProvider(prov) {{
+            document.getElementById('current_provider').value = prov;
+            
+            const cards = document.querySelectorAll('.provider-card');
+            cards.forEach(c => c.classList.remove('active'));
+            event.currentTarget.classList.add('active');
+            
+            const dropdowns = document.querySelectorAll('.model-select-group');
+            dropdowns.forEach(d => d.classList.remove('active'));
+            document.getElementById('models-' + prov).classList.add('active');
+        }}
+
+        function toggleVisibility(btn) {{
+            const input = btn.previousElementSibling;
+            if (input.type === "password") {{
+                input.type = "text";
+                btn.textContent = "OCULTAR";
+            }} else {{
+                input.type = "password";
+                btn.textContent = "VER";
+            }}
+        }}
+    </script>
+</body>
+</html>"""
+
+SUCCESS_HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Configuración Guardada</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        body {{
+            background: #0b0f19;
+            color: #fff;
+            font-family: 'Outfit', sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            text-align: center;
+        }}
+        .card {{
+            background: rgba(17, 24, 39, 0.7);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            max-width: 450px;
+        }}
+        .icon {{
+            font-size: 4rem;
+            margin-bottom: 20px;
+            animation: pulse 1.5s infinite;
+        }}
+        @keyframes pulse {{
+            0% {{ transform: scale(1); }}
+            50% {{ transform: scale(1.1); }}
+            100% {{ transform: scale(1); }}
+        }}
+        h2 {{ margin-bottom: 10px; background: linear-gradient(135deg, #a78bfa, #ec4899); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }}
+        p {{ color: #9ca3af; font-size: 0.95rem; line-height: 1.5; }}
+    </style>
+    <script>
+        setTimeout(function() {{
+            window.location.href = "https://t.me/Boty_generatorbot";
+        }}, 2500);
+    </script>
+</head>
+<body>
+    <div class="card">
+        <div class="icon">✨</div>
+        <h2>¡Configuración Guardada!</h2>
+        <p>Tus API Keys y preferencias se han actualizado con éxito en Firestore.<br>Redireccionando de vuelta a Telegram...</p>
+    </div>
+</body>
+</html>"""
+
+def make_options(provider, selected):
+    opts = []
+    for model in ai.MODELS.get(provider, []):
+        sel = "selected" if model == selected else ""
+        opts.append(f'<option value="{model}" {sel}>{model}</option>')
+    return "\n".join(opts)
+
+def notify_user_via_bot(user_id, message):
+    if not BOT_TOKEN:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        data = urllib.parse.urlencode({
+            "chat_id": user_id,
+            "text": message,
+            "parse_mode": "Markdown"
+        }).encode("utf-8")
+        req = urllib.request.Request(url, data=data)
+        urllib.request.urlopen(req, timeout=5)
+    except Exception as e:
+        print(f"Error sending bot notification: {e}")
+
+# --- Bot helper keyboards ---
+def get_main_keyboard():
+    markup = InlineKeyboardMarkup(row_width=2)
+    btn_prov = InlineKeyboardButton("🔌 Cambiar Proveedor", callback_data="select_provider")
+    btn_model = InlineKeyboardButton("🤖 Cambiar Modelo", callback_data="select_model")
+    btn_status = InlineKeyboardButton("📊 Ver Estado / Keys", callback_data="show_status")
+    btn_clear = InlineKeyboardButton("🧹 Limpiar Chat", callback_data="clear_hist")
+    markup.add(btn_prov, btn_model)
+    markup.add(btn_status, btn_clear)
+    return markup
+
+# --- Bot message handlers ---
+@bot.message_handler(commands=['start', 'menu'])
+def send_welcome(message):
+    user_id = message.from_user.id
+    first_name = message.from_user.first_name
+    
+    token = config.generate_login_token(user_id)
+    url = f"{WEB_URL}/login?token={token}"
+    
+    welcome_text = (
+        f"😈 *¡Hola, {first_name}! Soy Boty Generator* 🤖🔥\n\n"
+        "Estoy corriendo desde la nube en Firebase Cloud Functions.\n\n"
+        f"🔑 *Configuración Web Directa*:\n"
+        f"👉 [Abrir Panel de Configuración Web]({url})\n\n"
+        "Usa los botones de abajo para cambiar de proveedor, modelo o limpiar el chat."
+    )
+    bot.send_message(user_id, welcome_text, parse_mode="Markdown", reply_markup=get_main_keyboard())
+
+@bot.message_handler(commands=['login', 'web'])
+def send_login_link(message):
+    user_id = message.from_user.id
+    token = config.generate_login_token(user_id)
+    url = f"{WEB_URL}/login?token={token}"
+    
+    markup = InlineKeyboardMarkup()
+    btn_back = InlineKeyboardButton("⬅️ Volver al Menú", callback_data="show_main_menu")
+    markup.add(btn_back)
+    
+    bot.send_message(
+        user_id,
+        f"✨ *Acceso Seguro al Panel Web*\n\n"
+        f"👉 [Haz clic aquí para abrir tu configuración web]({url})\n\n"
+        f"Este enlace es personal y expirará en 30 minutos.",
+        parse_mode="Markdown",
+        reply_markup=markup
+    )
+
+@bot.message_handler(commands=['provider'])
+def command_provider(message):
+    user_id = message.from_user.id
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("Google Gemini", callback_data="set_prov_gemini"),
+        InlineKeyboardButton("ChatGPT (OpenAI)", callback_data="set_prov_openai"),
+        InlineKeyboardButton("Claude (Anthropic)", callback_data="set_prov_anthropic"),
+        InlineKeyboardButton("Grok (xAI)", callback_data="set_prov_grok")
+    )
+    markup.add(InlineKeyboardButton("⬅️ Volver al Menú", callback_data="show_main_menu"))
+    bot.send_message(user_id, "🔌 *Selecciona el Proveedor de IA:*", parse_mode="Markdown", reply_markup=markup)
+
+@bot.message_handler(commands=['model'])
+def command_model(message):
+    user_id = message.from_user.id
+    cfg = config.get_user_config(user_id)
+    prov = cfg.get("current_provider", "gemini")
+    
+    markup = InlineKeyboardMarkup(row_width=1)
+    models = ai.MODELS.get(prov, [])
+    for m in models:
+        markup.add(InlineKeyboardButton(m, callback_data=f"set_model_{m}"))
+    markup.add(InlineKeyboardButton("⬅️ Volver al Menú", callback_data="show_main_menu"))
+        
+    bot.send_message(
+        user_id,
+        f"🤖 *Selecciona el modelo para {prov.upper()}:*",
+        parse_mode="Markdown",
+        reply_markup=markup
+    )
+
+@bot.message_handler(commands=['status'])
+def command_status(message):
+    user_id = message.from_user.id
+    status_txt = get_status_text(user_id)
+    token = config.generate_login_token(user_id)
+    url = f"{WEB_URL}/login?token={token}"
+    status_txt += f"\n🔗 *Configuración Web*: [Abrir Portal]({url})"
+    
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton("🔑 Configurar por Chat", callback_data="key_chat_menu"),
+        InlineKeyboardButton("⬅️ Volver al Menú", callback_data="show_main_menu")
+    )
+    bot.send_message(user_id, status_txt, parse_mode="Markdown", reply_markup=markup)
+
+@bot.message_handler(commands=['clear'])
+def command_clear(message):
+    user_id = message.from_user.id
+    ai.clear_history(user_id)
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("⬅️ Volver al Menú", callback_data="show_main_menu"))
+    bot.send_message(user_id, "🧹 *Historial de chat limpiado.*", parse_mode="Markdown", reply_markup=markup)
+
+@bot.message_handler(commands=['help'])
+def command_help(message):
+    help_text = (
+        "😈 *Comandos disponibles:* 🤖\n\n"
+        "• `/start` - Menú principal interactivo.\n"
+        "• `/login` - Enlace de configuración web temporal.\n"
+        "• `/provider` - Cambia el proveedor de IA activo.\n"
+        "• `/model` - Cambia el modelo del proveedor activo.\n"
+        "• `/status` - Muestra la configuración y API keys.\n"
+        "• `/clear` - Limpia la memoria del chat.\n"
+        "• `/help` - Muestra este mensaje de ayuda.\n\n"
+        "📥 *Descarga de videos*: Envíame cualquier enlace de TikTok, YouTube, Instagram, Facebook, etc., y te saldrán los botones de conversión automáticamente."
+    )
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("⬅️ Volver al Menú", callback_data="show_main_menu"))
+    bot.send_message(message.from_user.id, help_text, parse_mode="Markdown", reply_markup=markup)
+
+# --- Bot Callback Queries ---
+@bot.callback_query_handler(func=lambda call: True)
+def handle_callbacks(call):
+    user_id = call.from_user.id
+    data = call.data
+    
+    if data == "show_main_menu":
+        if user_id in waiting_for_key:
+            del waiting_for_key[user_id]
+            
+        token = config.generate_login_token(user_id)
+        url = f"{WEB_URL}/login?token={token}"
+        
+        welcome_text = (
+            f"😈 *Menú Principal — Boty Generator* 🤖🔥\n\n"
+            "Elige una de las siguientes opciones dinámicas para configurar tu experiencia de chat:\n\n"
+            f"🔑 *Configuración Web Directa*:\n"
+            f"👉 [Abrir Panel de Configuración Web]({url})"
+        )
+        bot.edit_message_text(
+            chat_id=user_id,
+            message_id=call.message.message_id,
+            text=welcome_text,
+            parse_mode="Markdown",
+            reply_markup=get_main_keyboard()
+        )
+        bot.answer_callback_query(call.id)
+        
+    elif data == "web_login":
+        if user_id in waiting_for_key:
+            del waiting_for_key[user_id]
+            
+        token = config.generate_login_token(user_id)
+        url = f"{WEB_URL}/login?token={token}"
+        
+        markup = InlineKeyboardMarkup(row_width=1)
+        markup.add(InlineKeyboardButton("⬅️ Volver al Menú", callback_data="show_main_menu"))
+        bot.edit_message_text(
+            chat_id=user_id,
+            message_id=call.message.message_id,
+            text=(
+                f"🔗 *Panel de Configuración Web*\n\n"
+                f"👉 [Haz clic aquí para abrir el portal web]({url})\n\n"
+                f"Este enlace expirará en 30 minutos por seguridad."
+            ),
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+        bot.answer_callback_query(call.id)
+        
+    elif data == "select_provider":
+        markup = InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            InlineKeyboardButton("Google Gemini", callback_data="set_prov_gemini"),
+            InlineKeyboardButton("ChatGPT (OpenAI)", callback_data="set_prov_openai"),
+            InlineKeyboardButton("Claude (Anthropic)", callback_data="set_prov_anthropic"),
+            InlineKeyboardButton("Grok (xAI)", callback_data="set_prov_grok")
+        )
+        markup.add(InlineKeyboardButton("⬅️ Volver al Menú", callback_data="show_main_menu"))
+        bot.edit_message_text(
+            chat_id=user_id,
+            message_id=call.message.message_id,
+            text="🔌 *Selecciona el Proveedor de IA:*",
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+        bot.answer_callback_query(call.id)
+        
+    elif data.startswith("set_prov_"):
+        prov = data.split("set_prov_")[1]
+        cfg = config.get_user_config(user_id)
+        cfg["current_provider"] = prov
+        config.save_user_config(user_id, cfg)
+        
+        markup = InlineKeyboardMarkup(row_width=1)
+        models = ai.MODELS.get(prov, [])
+        for m in models:
+            markup.add(InlineKeyboardButton(m, callback_data=f"set_model_{m}"))
+        markup.add(InlineKeyboardButton("⬅️ Volver al Menú", callback_data="show_main_menu"))
+        
+        bot.edit_message_text(
+            chat_id=user_id,
+            message_id=call.message.message_id,
+            text=f"🔌 Proveedor cambiado a *{prov.upper()}*.\n\n🤖 *Elige ahora el modelo activo para {prov.upper()}:*",
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+        bot.answer_callback_query(call.id, f"Proveedor cambiado a {prov.upper()}")
+        
+    elif data == "select_model":
+        cfg = config.get_user_config(user_id)
+        prov = cfg.get("current_provider", "gemini")
+        
+        markup = InlineKeyboardMarkup(row_width=1)
+        models = ai.MODELS.get(prov, [])
+        for m in models:
+            markup.add(InlineKeyboardButton(m, callback_data=f"set_model_{m}"))
+        markup.add(InlineKeyboardButton("⬅️ Volver al Menú", callback_data="show_main_menu"))
+            
+        bot.edit_message_text(
+            chat_id=user_id,
+            message_id=call.message.message_id,
+            text=f"🤖 *Selecciona el modelo para {prov.upper()}:*",
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+        bot.answer_callback_query(call.id)
+        
+    elif data.startswith("set_model_"):
+        model_name = data.split("set_model_")[1]
+        cfg = config.get_user_config(user_id)
+        prov = cfg.get("current_provider", "gemini")
+        cfg["selected_models"][prov] = model_name
+        config.save_user_config(user_id, cfg)
+        
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("⬅️ Volver al Menú", callback_data="show_main_menu"))
+        bot.edit_message_text(
+            chat_id=user_id,
+            message_id=call.message.message_id,
+            text=f"🤖 Modelo activo para *{prov.upper()}* cambiado a `{model_name}`.",
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+        bot.answer_callback_query(call.id, f"Modelo cambiado a {model_name}")
+        
+    elif data == "show_status":
+        status_txt = get_status_text(user_id)
+        token = config.generate_login_token(user_id)
+        url = f"{WEB_URL}/login?token={token}"
+        status_txt += f"\n🔗 *Configuración Web*: [Abrir Portal]({url})"
+        
+        markup = InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            InlineKeyboardButton("🔑 Configurar por Chat", callback_data="key_chat_menu"),
+            InlineKeyboardButton("⬅️ Volver al Menú", callback_data="show_main_menu")
+        )
+        bot.edit_message_text(
+            chat_id=user_id,
+            message_id=call.message.message_id,
+            text=status_txt,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+        bot.answer_callback_query(call.id)
+        
+    elif data == "clear_hist":
+        ai.clear_history(user_id)
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("⬅️ Volver al Menú", callback_data="show_main_menu"))
+        bot.edit_message_text(
+            chat_id=user_id,
+            message_id=call.message.message_id,
+            text="🧹 *Historial de chat borrado.*",
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+        bot.answer_callback_query(call.id, "Historial limpiado")
+        
+    elif data == "key_chat_menu":
+        markup = InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            InlineKeyboardButton("Gemini Key", callback_data="setup_key_gemini"),
+            InlineKeyboardButton("OpenAI Key", callback_data="setup_key_openai"),
+            InlineKeyboardButton("Claude Key", callback_data="setup_key_anthropic"),
+            InlineKeyboardButton("Grok Key", callback_data="setup_key_grok")
+        )
+        markup.add(InlineKeyboardButton("⬅️ Volver", callback_data="show_status"))
+        bot.edit_message_text(
+            chat_id=user_id,
+            message_id=call.message.message_id,
+            text="🔑 *Elige qué API Key deseas configurar por chat:*",
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+        bot.answer_callback_query(call.id)
+        
+    elif data.startswith("setup_key_"):
+        prov = data.split("setup_key_")[1]
+        waiting_for_key[user_id] = prov
+        
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("❌ Cancelar", callback_data="cancel_key_setup"))
+        bot.edit_message_text(
+            chat_id=user_id,
+            message_id=call.message.message_id,
+            text=(
+                f"🔑 *Configurando API Key para {prov.upper()}*\n\n"
+                f"Por favor, escribe y envíame tu API Key en el próximo mensaje.\n\n"
+                f"⚠️ *Nota*: Tu mensaje será borrado del historial de chat inmediatamente después de guardarse por seguridad."
+            ),
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+        bot.answer_callback_query(call.id)
+        
+    elif data == "cancel_key_setup":
+        if user_id in waiting_for_key:
+            del waiting_for_key[user_id]
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("⬅️ Volver al Menú", callback_data="show_main_menu"))
+        bot.edit_message_text(
+            chat_id=user_id,
+            message_id=call.message.message_id,
+            text="❌ *Configuración de API Key cancelada.*",
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+        bot.answer_callback_query(call.id)
+        
+    # --- Serverless Synchronous Media Downloads ---
+    elif data.startswith("dl_mp4_") or data.startswith("dl_mp3_"):
+        parts = data.split("_")
+        dtype = parts[1]
+        short_id = parts[2]
+        
+        url = pending_downloads.get(short_id)
+        if not url:
+            bot.edit_message_text(
+                chat_id=user_id,
+                message_id=call.message.message_id,
+                text="⚠️ *Error*: El enlace ha caducado. Vuelve a enviarlo."
+            )
+            bot.answer_callback_query(call.id)
+            return
+            
+        bot.edit_message_text(
+            chat_id=user_id,
+            message_id=call.message.message_id,
+            text=f"📥 *Iniciando descarga ({dtype.upper()}) en la nube...*\n\n⚙️ Procesando, por favor espera...",
+            parse_mode="Markdown"
+        )
+        bot.answer_callback_query(call.id)
+        
+        # In serverless environment, we execute synchronously to prevent frozen threads
+        process_download_sync(user_id, call.message.message_id, url, dtype, short_id)
+
+    elif data.startswith("ai_chat_"):
+        short_id = data.split("ai_chat_")[1]
+        url = pending_downloads.get(short_id)
+        if not url:
+            bot.edit_message_text(
+                chat_id=user_id,
+                message_id=call.message.message_id,
+                text="⚠️ *Error*: El enlace ha caducado. Vuelve a enviarlo."
+            )
+            bot.answer_callback_query(call.id)
+            return
+            
+        if short_id in pending_downloads:
+            del pending_downloads[short_id]
+            
+        bot.edit_message_text(
+            chat_id=user_id,
+            message_id=call.message.message_id,
+            text="💬 *Procesando link con la IA...*",
+            parse_mode="Markdown"
+        )
+        bot.answer_callback_query(call.id)
+        
+        bot.send_chat_action(user_id, "typing")
+        cfg = config.get_user_config(user_id)
+        reply = ai.generate_response(user_id, f"Háblame de este link y haz un resumen: {url}", cfg)
+        bot.send_message(user_id, reply, parse_mode="Markdown")
+
+def process_download_sync(user_id, message_id, url, dtype, short_id):
+    try:
+        filepath, title, err = downloader.download_media(url, dtype)
+        
+        if err:
+            bot.edit_message_text(
+                chat_id=user_id,
+                message_id=message_id,
+                text=f"❌ *Error al descargar el archivo en la nube:*\n`{err}`",
+                parse_mode="Markdown"
+            )
+            return
+            
+        if not filepath or not os.path.exists(filepath):
+            bot.edit_message_text(
+                chat_id=user_id,
+                message_id=message_id,
+                text="❌ *Error*: No se pudo localizar el archivo temporal en el servidor de Firebase.",
+                parse_mode="Markdown"
+            )
+            return
+            
+        size_mb = os.path.getsize(filepath) / (1024 * 1024)
+        if size_mb > 49.9:
+            bot.edit_message_text(
+                chat_id=user_id,
+                message_id=message_id,
+                text=f"⚠️ *El archivo ({size_mb:.1f} MB) excede el límite de 50MB de Telegram.*",
+                parse_mode="Markdown"
+            )
+            try:
+                os.remove(filepath)
+            except Exception:
+                pass
+            return
+            
+        # Send
+        with open(filepath, 'rb') as f:
+            if dtype == "mp3":
+                bot.send_audio(
+                    chat_id=user_id,
+                    audio=f,
+                    title=title,
+                    caption=f"🎵 {title}\nDescargado con 😈 Boty Generator 🤖"
+                )
+            else:
+                bot.send_video(
+                    chat_id=user_id,
+                    video=f,
+                    caption=f"🎥 {title}\nDescargado con 😈 Boty Generator 🤖"
+                )
+                
+        try:
+            bot.delete_message(user_id, message_id)
+        except Exception:
+            pass
+            
+        try:
+            os.remove(filepath)
+        except Exception:
+            pass
+            
+        if short_id in pending_downloads:
+            del pending_downloads[short_id]
+            
+    except Exception as e:
+        bot.send_message(user_id, f"❌ *Error enviando archivo desde Firebase:*\n`{str(e)}`", parse_mode="Markdown")
+
+# --- Normal message handler ---
+@bot.message_handler(func=lambda msg: True)
+def handle_message(message):
+    user_id = message.from_user.id
+    prompt = message.text
+    
+    # 1. Key setup check
+    if user_id in waiting_for_key:
+        prov = waiting_for_key[user_id]
+        cfg = config.get_user_config(user_id)
+        cfg["api_keys"][prov] = prompt.strip()
+        config.save_user_config(user_id, cfg)
+        
+        try:
+            bot.delete_message(message.chat.id, message.message_id)
+        except Exception:
+            pass
+            
+        del waiting_for_key[user_id]
+        
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("⬅️ Volver al Menú", callback_data="show_main_menu"))
+        bot.send_message(
+            user_id,
+            f"✅ *¡API Key de {prov.upper()} guardada con éxito en Firestore!*\n\n"
+            f"Tu mensaje ha sido eliminado por seguridad.",
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+        return
+        
+    # 2. Media URL check
+    urls = re.findall(r'(https?://[^\s]+)', prompt)
+    if urls:
+        link = urls[0]
+        is_media = any(domain in link.lower() for domain in [
+            "youtube.com", "youtu.be", "tiktok.com", "instagram.com", 
+            "facebook.com", "twitter.com", "x.com", "vimeo.com", 
+            "kwai.com", "pinterest.com", "twitch.tv"
+        ])
+        
+        if is_media:
+            short_id = str(uuid.uuid4())[:8]
+            pending_downloads[short_id] = link
+            
+            markup = InlineKeyboardMarkup(row_width=2)
+            markup.add(
+                InlineKeyboardButton("🎥 Video (MP4)", callback_data=f"dl_mp4_{short_id}"),
+                InlineKeyboardButton("🎵 Audio (MP3)", callback_data=f"dl_mp3_{short_id}")
+            )
+            markup.add(
+                InlineKeyboardButton("💬 Consultar a la IA", callback_data=f"ai_chat_{short_id}")
+            )
+            bot.send_message(
+                user_id,
+                f"📥 *Enlace detectado:*\n`{link}`\n\n¿Qué deseas hacer?",
+                parse_mode="Markdown",
+                reply_markup=markup
+            )
+            return
+            
+    # 3. AI response
+    bot.send_chat_action(user_id, "typing")
+    cfg = config.get_user_config(user_id)
+    reply = ai.generate_response(user_id, prompt, cfg)
+    bot.send_message(user_id, reply, parse_mode="Markdown")
+
+# --- FastAPI Routes for Firebase Serverless App ---
+
+@app.post("/webhook")
+async def webhook(request: Request):
+    if request.headers.get("content-type") == "application/json":
+        json_string = await request.body()
+        update = telebot.types.Update.de_json(json_string.decode('utf-8'))
+        bot.process_new_updates([update])
+        return {"status": "ok"}
+    raise HTTPException(status_code=400, detail="Invalid Content-Type")
+
+@app.get("/login", response_class=HTMLResponse)
+def login(token: str = Query(...)):
+    user_id = config.get_user_by_token(token)
+    if not user_id:
+        return HTMLResponse("<h2>⚠️ Token de acceso inválido o expirado.</h2><p>Por favor solicita un nuevo link en el bot con el comando /login.</p>", status_code=400)
+    
+    cfg = config.get_user_config(user_id)
+    prov = cfg.get("current_provider", "gemini")
+    api_keys = cfg.get("api_keys", {})
+    selected_models = cfg.get("selected_models", {})
+    
+    html = LOGIN_HTML_TEMPLATE.format(
+        token=token,
+        current_provider=prov,
+        gemini_card_active="active" if prov == "gemini" else "",
+        openai_card_active="active" if prov == "openai" else "",
+        anthropic_card_active="active" if prov == "anthropic" else "",
+        grok_card_active="active" if prov == "grok" else "",
+        key_gemini=api_keys.get("gemini", ""),
+        key_openai=api_keys.get("openai", ""),
+        key_anthropic=api_keys.get("anthropic", ""),
+        key_grok=api_keys.get("grok", ""),
+        gemini_models_active="active" if prov == "gemini" else "",
+        openai_models_active="active" if prov == "openai" else "",
+        anthropic_models_active="active" if prov == "anthropic" else "",
+        grok_models_active="active" if prov == "grok" else "",
+        gemini_model_options=make_options("gemini", selected_models.get("gemini", "gemini-1.5-flash")),
+        openai_model_options=make_options("openai", selected_models.get("openai", "gpt-4o-mini")),
+        anthropic_model_options=make_options("anthropic", selected_models.get("anthropic", "claude-3-5-haiku-latest")),
+        grok_model_options=make_options("grok", selected_models.get("grok", "grok-2-1212"))
+    )
+    return html
+
+@app.post("/save", response_class=HTMLResponse)
+def save_config(
+    token: str = Form(...),
+    current_provider: str = Form(...),
+    key_gemini: str = Form(""),
+    key_openai: str = Form(""),
+    key_anthropic: str = Form(""),
+    key_grok: str = Form(""),
+    model_gemini: str = Form(""),
+    model_openai: str = Form(""),
+    model_anthropic: str = Form(""),
+    model_grok: str = Form("")
+):
+    user_id = config.get_user_by_token(token)
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Token inválido o expirado")
+        
+    cfg = config.get_user_config(user_id)
+    cfg["current_provider"] = current_provider
+    cfg["api_keys"]["gemini"] = key_gemini.strip()
+    cfg["api_keys"]["openai"] = key_openai.strip()
+    cfg["api_keys"]["anthropic"] = key_anthropic.strip()
+    cfg["api_keys"]["grok"] = key_grok.strip()
+    
+    if model_gemini:
+        cfg["selected_models"]["gemini"] = model_gemini
+    if model_openai:
+        cfg["selected_models"]["openai"] = model_openai
+    if model_anthropic:
+        cfg["selected_models"]["anthropic"] = model_anthropic
+    if model_grok:
+        cfg["selected_models"]["grok"] = model_grok
+        
+    config.save_user_config(user_id, cfg)
+    
+    prov_label = current_provider.upper()
+    active_model = cfg["selected_models"].get(current_provider, "default")
+    message = (
+        f"✅ *¡Configuración cargada exitosamente!*\n\n"
+        f"🔌 *Proveedor Activo*: {prov_label}\n"
+        f"🤖 *Modelo Activo*: `{active_model}`\n\n"
+        f"Ya puedes escribirme cualquier cosa y te responderé."
+    )
+    notify_user_via_bot(user_id, message)
+    config.consume_token(token)
+    return SUCCESS_HTML_TEMPLATE
+
+# --- Firebase Functions wrapper ---
+@https_fn.on_request(memory=512, timeout_sec=120)
+def boty_generator(req: https_fn.Request) -> https_fn.Response:
+    # Wrap FastAPI using ASGI request-response flow for serverless execution
+    from fastapi.testclient import TestClient
+    client = TestClient(app)
+    
+    # Re-route requests dynamically to FastAPI
+    method = req.method
+    headers = dict(req.headers)
+    
+    url_path = req.path
+    if req.query_string:
+        url_path += f"?{req.query_string.decode('utf-8')}"
+        
+    body = req.get_data()
+    
+    # Fast Client call inside process
+    response = client.request(
+        method=method,
+        url=url_path,
+        headers=headers,
+        content=body,
+        follow_redirects=False
+    )
+    
+    return https_fn.Response(
+        response.content,
+        status=response.status_code,
+        headers=dict(response.headers)
+    )

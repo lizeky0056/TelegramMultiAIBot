@@ -1,0 +1,28 @@
+# Virtual Environment
+venv/
+.venv/
+
+# Environment variables (secrets)
+.env
+firebase/functions/.env
+
+# Local Databases (session & keys)
+db.json
+tokens.json
+firebase/functions/db.json
+firebase/functions/tokens.json
+
+# Cache files
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# User downloads (temporary media)
+downloads/
+/tmp/downloads/
+
+# Firebase debug logs and temporary cache
+.firebase/
+firebase-debug.log
+firestore-debug.log
+.runtime/
