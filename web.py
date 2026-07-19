@@ -14,6 +14,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8886104559:AAHclO0tYWadm4eMMrPB1C3PjQI6uqOps
 
 app = FastAPI(title="Boty Generator Telegram Config Panel")
 
+@app.get("/health")
+def health_check():
+    return {"status": "ok", "message": "Boty Generator backend is running smoothly"}
+
 LOGIN_HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="es">
 <head>
